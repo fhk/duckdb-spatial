@@ -4,6 +4,30 @@
 
 require spatial
 
+# More SQL partitions than hash bins: groups sharing a bin must not cluster
+# together, and each partition must use its own parameters and restart IDs.
+query I
+SELECT count(*) FROM (
+    SELECT g, j, ST_ClusterDBSCAN(
+        {'x': CASE WHEN j = 2 THEN 5.0 ELSE j * 0.1 END::DOUBLE, 'y': 0.0::DOUBLE}::POINT_2D,
+        CASE WHEN g % 2 = 0 THEN 0.2 ELSE 10.0 END, 2
+    ) OVER (PARTITION BY g ORDER BY j) AS cid
+    FROM range(4096) groups(g), range(3) points(j)
+) WHERE cid IS DISTINCT FROM CASE WHEN j < 2 OR g % 2 = 1 THEN 0 ELSE NULL END;
+----
+0
+
+# A NULL partition key is one independent SQL partition too.
+query III
+SELECT g, j, ST_ClusterDBSCAN({'x': 0.0::DOUBLE, 'y': 0.0::DOUBLE}::POINT_2D, 0.2, 2)
+OVER (PARTITION BY g ORDER BY j)
+FROM (VALUES (NULL, 1), (NULL, 2), (1, 3)) t(g, j)
+ORDER BY j;
+----
+NULL	1	0
+NULL	2	0
+1	3	NULL
+
 # Parallel window callbacks must use input row positions, not callback order.
 statement ok
 SET threads = 8;

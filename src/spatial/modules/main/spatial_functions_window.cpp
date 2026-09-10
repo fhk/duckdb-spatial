@@ -14,7 +14,6 @@ namespace {
 
 struct DBSCANWindowState {
 	std::vector<int32_t> cluster_ids;
-	std::vector<bool> is_null;
 };
 
 struct ST_ClusterDBSCAN_Point2D {
@@ -38,97 +37,80 @@ struct ST_ClusterDBSCAN_Point2D {
 		}
 	}
 
-	static void WindowInit(AggregateInputData &, const WindowPartitionInput &partition, data_ptr_t g_state) {
-		auto &wstate = *reinterpret_cast<DBSCANWindowState *>(g_state);
-		const idx_t row_count = partition.count;
-		wstate.cluster_ids.assign(row_count, -1);
-		wstate.is_null.assign(row_count, false);
-
-		if (row_count == 0 || !partition.inputs || partition.column_ids.size() < 3) {
+	static void ClusterPartition(const std::vector<spatial::Point2D> &points, const std::vector<size_t> &rows,
+	                             const spatial::DBSCANParams &params, DBSCANWindowState &state) {
+		if (points.empty() || params.eps <= 0.0 || params.min_points <= 0) {
 			return;
 		}
+		spatial::FlatRTree2D index(32);
+		index.Build(spatial::ArrayView<spatial::Point2D>(points));
+		const auto clusters =
+		    spatial::DBSCANEngine::Cluster2D(spatial::ArrayView<spatial::Point2D>(points), index, params);
+		for (size_t i = 0; i < rows.size(); i++) {
+			state.cluster_ids[rows[i]] = clusters.GetClusterId(i);
+		}
+	}
 
-		std::vector<spatial::Point2D> valid_points;
-		std::vector<size_t> row_mapping; // maps valid_points index -> partition row index
-		valid_points.reserve(row_count);
-		row_mapping.reserve(row_count);
+	static void WindowInit(AggregateInputData &, const WindowPartitionInput &partition, data_ptr_t g_state) {
+		auto &state = *reinterpret_cast<DBSCANWindowState *>(g_state);
+		state.cluster_ids.assign(partition.count, -1);
+		if (partition.count == 0) {
+			return;
+		}
+		if (!partition.inputs || !partition.partition_mask || partition.column_ids.size() != 3) {
+			throw InternalException("ST_ClusterDBSCAN requires window input and SQL partition boundaries");
+		}
 
-		double eps = 0.0;
-		int64_t min_points = 1;
-		bool params_read = false;
-
-		idx_t current_row = 0;
+		// Only the current SQL partition's points are retained. The result is shared
+		// read-only by evaluators, indexed by absolute position in the hash group.
+		std::vector<spatial::Point2D> points;
+		std::vector<size_t> rows;
+		spatial::DBSCANParams params;
+		idx_t row_offset = 0;
 		for (auto &chunk : partition.inputs->Chunks(partition.column_ids)) {
-			const idx_t chunk_size = chunk.size();
-			if (chunk_size == 0) {
-				continue;
-			}
+			auto &point_vector = chunk.data[0];
+			point_vector.Flatten(chunk.size());
+			auto &coordinates = StructVector::GetEntries(point_vector);
+			coordinates[0]->Flatten(chunk.size());
+			coordinates[1]->Flatten(chunk.size());
+			const auto x = FlatVector::GetData<double>(*coordinates[0]);
+			const auto y = FlatVector::GetData<double>(*coordinates[1]);
+			auto &point_validity = FlatVector::Validity(point_vector);
+			auto &x_validity = FlatVector::Validity(*coordinates[0]);
+			auto &y_validity = FlatVector::Validity(*coordinates[1]);
 
-			auto &pt_vec = chunk.data[0];
-			auto &eps_vec = chunk.data[1];
-			auto &min_pts_vec = chunk.data[2];
-
-			if (!params_read) {
-				auto eps_val = eps_vec.GetValue(0);
-				auto min_pts_val = min_pts_vec.GetValue(0);
-				if (!eps_val.IsNull()) {
-					eps = eps_val.GetValue<double>();
+			for (idx_t i = 0; i < chunk.size(); i++) {
+				const auto row = row_offset + i;
+				if (row == 0 || partition.partition_mask->RowIsValid(row)) {
+					ClusterPartition(points, rows, params, state);
+					points.clear();
+					rows.clear();
+					params = spatial::DBSCANParams();
+					const auto eps = chunk.data[1].GetValue(i);
+					const auto min_points = chunk.data[2].GetValue(i);
+					if (!eps.IsNull()) {
+						params.eps = eps.GetValue<double>();
+					}
+					if (!min_points.IsNull()) {
+						params.min_points = min_points.GetValue<int64_t>();
+					}
 				}
-				if (!min_pts_val.IsNull()) {
-					min_points = min_pts_val.GetValue<int64_t>();
-				}
-				params_read = true;
-			}
-
-			pt_vec.Flatten(chunk_size);
-			auto &entries = StructVector::GetEntries(pt_vec);
-			entries[0]->Flatten(chunk_size);
-			entries[1]->Flatten(chunk_size);
-
-			auto x_data = FlatVector::GetData<double>(*entries[0]);
-			auto y_data = FlatVector::GetData<double>(*entries[1]);
-			auto &pt_validity = FlatVector::Validity(pt_vec);
-			auto &x_validity = FlatVector::Validity(*entries[0]);
-			auto &y_validity = FlatVector::Validity(*entries[1]);
-
-			for (idx_t i = 0; i < chunk_size; ++i) {
-				const idx_t global_row = current_row + i;
-
-				if (!pt_validity.RowIsValid(i) || !x_validity.RowIsValid(i) || !y_validity.RowIsValid(i)) {
-					wstate.is_null[global_row] = true;
+				if (!point_validity.RowIsValid(i) || !x_validity.RowIsValid(i) || !y_validity.RowIsValid(i)) {
 					continue;
 				}
-
-				valid_points.emplace_back(x_data[i], y_data[i]);
-				row_mapping.push_back(global_row);
+				points.emplace_back(x[i], y[i]);
+				rows.push_back(row);
 			}
-
-			current_row += chunk_size;
+			row_offset += chunk.size();
 		}
-
-		if (valid_points.empty() || eps <= 0.0 || min_points <= 0) {
-			return;
-		}
-
-		spatial::FlatRTree2D rtree(32);
-		rtree.Build(spatial::ArrayView<spatial::Point2D>(valid_points));
-
-		spatial::DBSCANParams params(eps, min_points);
-		auto result =
-		    spatial::DBSCANEngine::Cluster2D(spatial::ArrayView<spatial::Point2D>(valid_points), rtree, params);
-
-		for (size_t i = 0; i < valid_points.size(); ++i) {
-			const size_t orig_row = row_mapping[i];
-			wstate.cluster_ids[orig_row] = result.GetClusterId(i);
-		}
+		ClusterPartition(points, rows, params, state);
 	}
 
 	static void Window(AggregateInputData &, const WindowPartitionInput &partition, const_data_ptr_t g_state,
 	                   data_ptr_t, const SubFrames &, Vector &result, idx_t rid) {
 		auto &wstate = *reinterpret_cast<const DBSCANWindowState *>(g_state);
 		const auto global_row = partition.row_index;
-		if (global_row >= wstate.cluster_ids.size() || wstate.is_null[global_row] ||
-		    wstate.cluster_ids[global_row] < 0) {
+		if (global_row >= wstate.cluster_ids.size() || wstate.cluster_ids[global_row] < 0) {
 			FlatVector::SetNull(result, rid, true);
 		} else {
 			FlatVector::GetData<int32_t>(result)[rid] = wstate.cluster_ids[global_row];
