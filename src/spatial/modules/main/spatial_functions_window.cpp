@@ -95,7 +95,8 @@ struct ST_ClusterDBSCAN_Point2D {
 						params.min_points = min_points.GetValue<int64_t>();
 					}
 				}
-				if (!point_validity.RowIsValid(i) || !x_validity.RowIsValid(i) || !y_validity.RowIsValid(i)) {
+				if (!partition.filter_mask.RowIsValid(row) || !point_validity.RowIsValid(i) ||
+				    !x_validity.RowIsValid(i) || !y_validity.RowIsValid(i)) {
 					continue;
 				}
 				points.emplace_back(x[i], y[i]);
