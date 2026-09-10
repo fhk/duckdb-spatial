@@ -91,6 +91,12 @@ public:
 		}
 
 		if (item_count_ <= node_size_) {
+			// Multiple leaves still have a root, even when they fit in one node.
+			// RadiusSearch starts there, so initialize its bounds and first child.
+			if (item_count_ > 1) {
+				boxes_[item_count_] = tree_box_;
+				indices_[item_count_] = 0;
+			}
 			return;
 		}
 

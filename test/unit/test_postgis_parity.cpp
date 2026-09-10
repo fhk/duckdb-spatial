@@ -9,6 +9,43 @@
 
 using namespace duckdb::spatial;
 
+void TestSmallTreeRegression() {
+    std::vector<Point2D> points = {
+        {0.0, 0.0}, {0.1, 0.0}, {0.0, 0.1},
+        {5.0, 5.0}, {5.1, 5.0}, {2.5, 2.5}
+    };
+    FlatRTree2D tree(32); // Same node size as the SQL window function.
+    tree.Build(ArrayView<Point2D>(points));
+    auto result = DBSCANEngine::Cluster2D(ArrayView<Point2D>(points), tree, DBSCANParams(0.2, 2));
+    assert(result.GetClusterIds() == std::vector<int32_t>({0, 0, 0, 1, 1, -1}));
+
+    // Compare neighborhood searches with brute force across the small-tree
+    // cutoff and multiple tree levels. Reuse the tree to check rebuilds too.
+    for (size_t count : {0, 1, 2, 31, 32, 33, 1024, 1025, 2, 0}) {
+        points.clear();
+        for (size_t i = 0; i < count; ++i) {
+            points.emplace_back(double(i % 17), double(i / 17));
+        }
+        tree.Build(ArrayView<Point2D>(points));
+        assert(tree.Count() == count);
+        std::vector<size_t> actual = {9999};
+        tree.RadiusSearch(Point2D(-100, -100), 0.2, actual);
+        assert(actual.empty());
+        for (const auto &center : points) {
+            std::vector<size_t> expected;
+            for (size_t i = 0; i < count; ++i) {
+                if (center.DistanceSquared(points[i]) <= 1.25 * 1.25) {
+                    expected.push_back(i);
+                }
+            }
+            tree.RadiusSearch(center, 1.25, actual);
+            std::sort(actual.begin(), actual.end());
+            assert(actual == expected);
+        }
+    }
+    std::cout << "Small-tree DBSCAN and radius-search regressions passed!" << std::endl;
+}
+
 void TestPostGISDocExample() {
     std::cout << "[PostGIS Parity] Testing PostGIS Documentation Example..." << std::endl;
     // PostGIS docs:
@@ -192,6 +229,7 @@ void TestPostGISRegressionSinglePoint3612b() {
 }
 
 int main() {
+    TestSmallTreeRegression();
     std::cout << "==========================================================" << std::endl;
     std::cout << "      PostGIS ST_ClusterDBSCAN Parity & Reproduction      " << std::endl;
     std::cout << "==========================================================" << std::endl;
@@ -206,4 +244,3 @@ int main() {
     std::cout << "All PostGIS ST_ClusterDBSCAN reproduction tests passed with 100% parity!" << std::endl;
     return 0;
 }
-
