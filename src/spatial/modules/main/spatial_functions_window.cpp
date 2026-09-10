@@ -17,6 +17,21 @@ struct DBSCANWindowState {
 };
 
 struct ST_ClusterDBSCAN_Point2D {
+	static spatial::DBSCANParams ReadParameters(DataChunk &chunk, idx_t row) {
+		const auto eps = chunk.data[1].GetValue(row);
+		const auto min_points = chunk.data[2].GetValue(row);
+		if (eps.IsNull() || min_points.IsNull()) {
+			throw InvalidInputException("ST_ClusterDBSCAN parameters must not be NULL");
+		}
+		spatial::DBSCANParams params(eps.GetValue<double>(), min_points.GetValue<int64_t>());
+		try {
+			params.Validate();
+		} catch (const std::invalid_argument &error) {
+			throw InvalidInputException("%s", error.what());
+		}
+		return params;
+	}
+
 	static idx_t StateSize(const AggregateFunction &) {
 		return sizeof(DBSCANWindowState);
 	}
@@ -39,7 +54,7 @@ struct ST_ClusterDBSCAN_Point2D {
 
 	static void ClusterPartition(const std::vector<spatial::Point2D> &points, const std::vector<size_t> &rows,
 	                             const spatial::DBSCANParams &params, DBSCANWindowState &state) {
-		if (points.empty() || params.eps <= 0.0 || params.min_points <= 0) {
+		if (points.empty()) {
 			return;
 		}
 		spatial::FlatRTree2D index(32);
@@ -81,23 +96,21 @@ struct ST_ClusterDBSCAN_Point2D {
 
 			for (idx_t i = 0; i < chunk.size(); i++) {
 				const auto row = row_offset + i;
+				const auto row_params = ReadParameters(chunk, i);
 				if (row == 0 || partition.partition_mask->RowIsValid(row)) {
 					ClusterPartition(points, rows, params, state);
 					points.clear();
 					rows.clear();
-					params = spatial::DBSCANParams();
-					const auto eps = chunk.data[1].GetValue(i);
-					const auto min_points = chunk.data[2].GetValue(i);
-					if (!eps.IsNull()) {
-						params.eps = eps.GetValue<double>();
-					}
-					if (!min_points.IsNull()) {
-						params.min_points = min_points.GetValue<int64_t>();
-					}
+					params = row_params;
+				} else if (params.eps != row_params.eps || params.min_points != row_params.min_points) {
+					throw InvalidInputException("ST_ClusterDBSCAN parameters must be constant within each partition");
 				}
 				if (!partition.filter_mask.RowIsValid(row) || !point_validity.RowIsValid(i) ||
 				    !x_validity.RowIsValid(i) || !y_validity.RowIsValid(i)) {
 					continue;
+				}
+				if (!std::isfinite(x[i]) || !std::isfinite(y[i])) {
+					throw InvalidInputException("ST_ClusterDBSCAN coordinates must be finite");
 				}
 				points.emplace_back(x[i], y[i]);
 				rows.push_back(row);

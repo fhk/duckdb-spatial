@@ -21,15 +21,17 @@ struct DBSCANParams {
 	double eps;
 	int64_t min_points;
 
-	DBSCANParams() : eps(0.0), min_points(1) {}
-	DBSCANParams(double eps_p, int64_t min_points_p) : eps(eps_p), min_points(min_points_p) {}
+	DBSCANParams() : eps(0.0), min_points(1) {
+	}
+	DBSCANParams(double eps_p, int64_t min_points_p) : eps(eps_p), min_points(min_points_p) {
+	}
 
 	void Validate() const {
-		if (eps <= 0.0) {
-			throw std::invalid_argument("DBSCAN parameter 'eps' must be greater than 0.0, got " + std::to_string(eps));
+		if (!std::isfinite(eps) || eps < 0.0) {
+			throw std::invalid_argument("DBSCAN parameter 'eps' must be finite and non-negative");
 		}
-		if (min_points <= 0) {
-			throw std::invalid_argument("DBSCAN parameter 'min_points' must be at least 1, got " + std::to_string(min_points));
+		if (min_points < 0) {
+			throw std::invalid_argument("DBSCAN parameter 'minpoints' must be non-negative");
 		}
 	}
 };
@@ -41,23 +43,31 @@ struct ClusterSummary2D {
 	BoundingBox2D bbox;
 	Point2D centroid;
 
-	ClusterSummary2D() : cluster_id(-1), point_count(0), centroid(0.0, 0.0) {}
-	ClusterSummary2D(int32_t id) : cluster_id(id), point_count(0), centroid(0.0, 0.0) {}
+	ClusterSummary2D() : cluster_id(-1), point_count(0), centroid(0.0, 0.0) {
+	}
+	ClusterSummary2D(int32_t id) : cluster_id(id), point_count(0), centroid(0.0, 0.0) {
+	}
 };
 
 // Result container for DBSCAN clustering execution
 class DBSCANResult {
 public:
-	DBSCANResult() : num_clusters_(0), num_noise_(0) {}
+	DBSCANResult() : num_clusters_(0), num_noise_(0) {
+	}
 
 	explicit DBSCANResult(size_t point_count)
-	    : cluster_ids_(point_count, static_cast<int32_t>(ClusterStatus::UNVISITED)),
-	      num_clusters_(0),
-	      num_noise_(0) {}
+	    : cluster_ids_(point_count, static_cast<int32_t>(ClusterStatus::UNVISITED)), num_clusters_(0), num_noise_(0) {
+	}
 
-	size_t Size() const { return cluster_ids_.size(); }
-	size_t NumClusters() const { return num_clusters_; }
-	size_t NumNoise() const { return num_noise_; }
+	size_t Size() const {
+		return cluster_ids_.size();
+	}
+	size_t NumClusters() const {
+		return num_clusters_;
+	}
+	size_t NumNoise() const {
+		return num_noise_;
+	}
 
 	int32_t GetClusterId(size_t idx) const {
 		return cluster_ids_[idx];

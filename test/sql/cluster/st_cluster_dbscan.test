@@ -220,3 +220,86 @@ query II
 SELECT id, ST_ClusterDBSCAN(pt, 20.1, 5) OVER () AS cid FROM single_pt;
 ----
 1	NULL
+
+# Zero radius clusters coincident points; zero minpoints permits singletons.
+query II
+SELECT i, ST_ClusterDBSCAN({'x': (i // 2)::DOUBLE, 'y': 0.0::DOUBLE}::POINT_2D, 0.0, 2)
+OVER (ORDER BY i) FROM range(3) t(i) ORDER BY i;
+----
+0	0
+1	0
+2	NULL
+
+query II
+SELECT i, ST_ClusterDBSCAN({'x': i::DOUBLE, 'y': 0.0::DOUBLE}::POINT_2D, 0.0, 0)
+OVER (ORDER BY i) FROM range(3) t(i) ORDER BY i;
+----
+0	0
+1	1
+2	2
+
+statement error
+SELECT ST_ClusterDBSCAN({'x': 0.0::DOUBLE, 'y': 0.0::DOUBLE}::POINT_2D, -1, 2) OVER ();
+----
+finite and non-negative
+
+statement error
+SELECT ST_ClusterDBSCAN({'x': 0.0::DOUBLE, 'y': 0.0::DOUBLE}::POINT_2D, 1, -1) OVER ();
+----
+minpoints' must be non-negative
+
+statement error
+SELECT ST_ClusterDBSCAN(NULL::POINT_2D, NULL, 2) OVER ();
+----
+parameters must not be NULL
+
+statement error
+SELECT ST_ClusterDBSCAN(NULL::POINT_2D, 1, NULL) OVER ();
+----
+parameters must not be NULL
+
+statement error
+SELECT ST_ClusterDBSCAN(NULL::POINT_2D, 'NaN'::DOUBLE, 2) OVER ();
+----
+finite and non-negative
+
+statement error
+SELECT ST_ClusterDBSCAN(NULL::POINT_2D, 'Infinity'::DOUBLE, 2) OVER ();
+----
+finite and non-negative
+
+statement error
+SELECT ST_ClusterDBSCAN({'x': 'NaN'::DOUBLE, 'y': 0.0::DOUBLE}::POINT_2D, 1, 2) OVER ();
+----
+coordinates must be finite
+
+statement error
+SELECT ST_ClusterDBSCAN({'x': 0.0::DOUBLE, 'y': 'Infinity'::DOUBLE}::POINT_2D, 1, 2) OVER ();
+----
+coordinates must be finite
+
+statement error
+SELECT ST_ClusterDBSCAN(NULL::POINT_2D, i::DOUBLE, 2) OVER () FROM range(2) t(i);
+----
+parameters must be constant within each partition
+
+statement error
+SELECT ST_ClusterDBSCAN(NULL::POINT_2D, 1, i) OVER () FROM range(2) t(i);
+----
+parameters must be constant within each partition
+
+# Parent NULLs and NULL coordinates neither contribute to density nor get IDs.
+query II
+SELECT i, ST_ClusterDBSCAN(pt, 0.1, 2) OVER (ORDER BY i)
+FROM (VALUES (0, NULL::POINT_2D),
+             (1, {'x': 0.0::DOUBLE, 'y': 0.0::DOUBLE}::POINT_2D),
+             (2, {'x': NULL::DOUBLE, 'y': 0.0::DOUBLE}::POINT_2D),
+             (3, {'x': 0.0::DOUBLE, 'y': NULL::DOUBLE}::POINT_2D),
+             (4, {'x': 0.0::DOUBLE, 'y': 0.0::DOUBLE}::POINT_2D)) t(i, pt)
+ORDER BY i;
+----
+0	NULL
+1	0
+2	NULL
+3	NULL
+4	0
