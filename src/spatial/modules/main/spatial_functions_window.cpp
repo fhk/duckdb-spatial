@@ -9,18 +9,12 @@
 #include "duckdb/function/aggregate_function.hpp"
 #include "duckdb/common/types/column/column_data_collection.hpp"
 
-#include <atomic>
-
 namespace duckdb {
 namespace {
 
 struct DBSCANWindowState {
 	std::vector<int32_t> cluster_ids;
 	std::vector<bool> is_null;
-	mutable std::atomic<idx_t> next_row;
-
-	DBSCANWindowState() : next_row(0) {
-	}
 };
 
 struct ST_ClusterDBSCAN_Point2D {
@@ -49,7 +43,6 @@ struct ST_ClusterDBSCAN_Point2D {
 		const idx_t row_count = partition.count;
 		wstate.cluster_ids.assign(row_count, -1);
 		wstate.is_null.assign(row_count, false);
-		wstate.next_row = 0;
 
 		if (row_count == 0 || !partition.inputs || partition.column_ids.size() < 3) {
 			return;
@@ -76,50 +69,37 @@ struct ST_ClusterDBSCAN_Point2D {
 			auto &min_pts_vec = chunk.data[2];
 
 			if (!params_read) {
-				UnifiedVectorFormat eps_format, min_pts_format;
-				eps_vec.ToUnifiedFormat(chunk_size, eps_format);
-				min_pts_vec.ToUnifiedFormat(chunk_size, min_pts_format);
-
-				auto eps_idx = eps_format.sel->get_index(0);
-				auto min_pts_idx = min_pts_format.sel->get_index(0);
-				if (eps_format.validity.RowIsValid(eps_idx)) {
-					eps = UnifiedVectorFormat::GetData<double>(eps_format)[eps_idx];
+				auto eps_val = eps_vec.GetValue(0);
+				auto min_pts_val = min_pts_vec.GetValue(0);
+				if (!eps_val.IsNull()) {
+					eps = eps_val.GetValue<double>();
 				}
-				if (min_pts_format.validity.RowIsValid(min_pts_idx)) {
-					min_points = UnifiedVectorFormat::GetData<int64_t>(min_pts_format)[min_pts_idx];
+				if (!min_pts_val.IsNull()) {
+					min_points = min_pts_val.GetValue<int64_t>();
 				}
 				params_read = true;
 			}
 
-			UnifiedVectorFormat pt_format;
-			pt_vec.ToUnifiedFormat(chunk_size, pt_format);
-
+			pt_vec.Flatten(chunk_size);
 			auto &entries = StructVector::GetEntries(pt_vec);
-			UnifiedVectorFormat x_format, y_format;
-			entries[0]->ToUnifiedFormat(chunk_size, x_format);
-			entries[1]->ToUnifiedFormat(chunk_size, y_format);
+			entries[0]->Flatten(chunk_size);
+			entries[1]->Flatten(chunk_size);
 
-			auto x_data = UnifiedVectorFormat::GetData<double>(x_format);
-			auto y_data = UnifiedVectorFormat::GetData<double>(y_format);
+			auto x_data = FlatVector::GetData<double>(*entries[0]);
+			auto y_data = FlatVector::GetData<double>(*entries[1]);
+			auto &pt_validity = FlatVector::Validity(pt_vec);
+			auto &x_validity = FlatVector::Validity(*entries[0]);
+			auto &y_validity = FlatVector::Validity(*entries[1]);
 
 			for (idx_t i = 0; i < chunk_size; ++i) {
 				const idx_t global_row = current_row + i;
-				auto pt_idx = pt_format.sel->get_index(i);
 
-				if (!pt_format.validity.RowIsValid(pt_idx)) {
+				if (!pt_validity.RowIsValid(i) || !x_validity.RowIsValid(i) || !y_validity.RowIsValid(i)) {
 					wstate.is_null[global_row] = true;
 					continue;
 				}
 
-				auto x_idx = x_format.sel->get_index(pt_idx);
-				auto y_idx = y_format.sel->get_index(pt_idx);
-
-				if (!x_format.validity.RowIsValid(x_idx) || !y_format.validity.RowIsValid(y_idx)) {
-					wstate.is_null[global_row] = true;
-					continue;
-				}
-
-				valid_points.emplace_back(x_data[x_idx], y_data[y_idx]);
+				valid_points.emplace_back(x_data[i], y_data[i]);
 				row_mapping.push_back(global_row);
 			}
 
@@ -134,8 +114,8 @@ struct ST_ClusterDBSCAN_Point2D {
 		rtree.Build(spatial::ArrayView<spatial::Point2D>(valid_points));
 
 		spatial::DBSCANParams params(eps, min_points);
-		auto result = spatial::DBSCANEngine::Cluster2D(
-		    spatial::ArrayView<spatial::Point2D>(valid_points), rtree, params);
+		auto result =
+		    spatial::DBSCANEngine::Cluster2D(spatial::ArrayView<spatial::Point2D>(valid_points), rtree, params);
 
 		for (size_t i = 0; i < valid_points.size(); ++i) {
 			const size_t orig_row = row_mapping[i];
@@ -143,12 +123,12 @@ struct ST_ClusterDBSCAN_Point2D {
 		}
 	}
 
-	static void Window(AggregateInputData &, const WindowPartitionInput &,
-	                   const_data_ptr_t g_state, data_ptr_t, const SubFrames &,
-	                   Vector &result, idx_t rid) {
+	static void Window(AggregateInputData &, const WindowPartitionInput &partition, const_data_ptr_t g_state,
+	                   data_ptr_t, const SubFrames &, Vector &result, idx_t rid) {
 		auto &wstate = *reinterpret_cast<const DBSCANWindowState *>(g_state);
-		idx_t global_row = wstate.next_row++;
-		if (global_row >= wstate.cluster_ids.size() || wstate.is_null[global_row] || wstate.cluster_ids[global_row] < 0) {
+		const auto global_row = partition.row_index;
+		if (global_row >= wstate.cluster_ids.size() || wstate.is_null[global_row] ||
+		    wstate.cluster_ids[global_row] < 0) {
 			FlatVector::SetNull(result, rid, true);
 		} else {
 			FlatVector::GetData<int32_t>(result)[rid] = wstate.cluster_ids[global_row];
@@ -161,11 +141,8 @@ struct ST_ClusterDBSCAN_Point2D {
 void RegisterSpatialWindowFunctions(ExtensionLoader &loader) {
 	// Register ST_ClusterDBSCAN for POINT_2D
 	AggregateFunction cluster_point2d(
-	    "ST_ClusterDBSCAN",
-	    {GeoTypes::POINT_2D(), LogicalType::DOUBLE, LogicalType::BIGINT},
-	    LogicalType::INTEGER,
-	    ST_ClusterDBSCAN_Point2D::StateSize,
-	    ST_ClusterDBSCAN_Point2D::StateInitialize,
+	    "ST_ClusterDBSCAN", {GeoTypes::POINT_2D(), LogicalType::DOUBLE, LogicalType::BIGINT}, LogicalType::INTEGER,
+	    ST_ClusterDBSCAN_Point2D::StateSize, ST_ClusterDBSCAN_Point2D::StateInitialize,
 	    nullptr, // update (null for window-only aggregate)
 	    nullptr, // combine
 	    nullptr, // finalize

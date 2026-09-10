@@ -4,6 +4,29 @@
 
 require spatial
 
+# Parallel window callbacks must use input row positions, not callback order.
+statement ok
+SET threads = 8;
+
+statement ok
+PRAGMA verify_parallelism;
+
+query I
+SELECT count(*) FROM (
+    SELECT i, ST_ClusterDBSCAN(
+        {'x': (i // 100)::DOUBLE, 'y': 0.0::DOUBLE}::POINT_2D, 0.1, 2
+    ) OVER (ORDER BY i) AS cid
+    FROM range(100000) t(i)
+) WHERE cid IS DISTINCT FROM i // 100;
+----
+0
+
+statement ok
+PRAGMA disable_verify_parallelism;
+
+statement ok
+RESET threads;
+
 # Regression: a partition fitting in one R-tree node must still find neighbors.
 query II
 WITH test_points AS (
