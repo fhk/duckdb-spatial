@@ -3679,16 +3679,26 @@ INTEGER ST_ClusterDBSCAN (point POINT_2D, eps DOUBLE, minpoints BIGINT)
 A window function that returns a cluster number (0-indexed integer) for each input point using the 2D [Density-Based Spatial Clustering of Applications with Noise (DBSCAN)](https://en.wikipedia.org/wiki/DBSCAN) algorithm.
 
 Unlike centroid-based clustering (such as $k$-means), DBSCAN does not require the number of clusters to be specified in advance. Instead, it discovers arbitrarily shaped spatial clusters based on density parameters:
+
 - `eps`: The maximum distance threshold ($\le \varepsilon$) for neighborhood expansion. Distances are evaluated as Cartesian Euclidean distances in the coordinate units of the input geometry.
 - `minpoints`: The minimum number of points required within the `eps`-neighborhood (including the point itself) to form a dense "core" cluster.
 
 A point is assigned to a cluster if it is either:
+
 - A **core point**: has at least `minpoints` within `eps` distance (including itself); or
 - A **border point**: is within `eps` distance of a core point.
 
 Points that do not meet the criteria to join any cluster are considered **noise** and are assigned a cluster number of `NULL`.
 
-To cluster within independent partitions (e.g. per city, date, or category), use the `OVER (PARTITION BY ...)` clause. Cluster IDs restart from 0 within each partition. To ensure deterministic assignment of border points that lie between two clusters across repeated runs, include an `ORDER BY` clause in the window definition.
+Use `OVER (PARTITION BY ...)` to cluster independently by city, date, or another key. Cluster IDs restart at 0 within each partition. For reproducible IDs and ambiguous border-point assignments, use a window `ORDER BY` with a unique tie-breaking key, such as `OVER (PARTITION BY city ORDER BY id)`.
+
+`eps` must be finite and non-negative; `minpoints` must be non-negative. Both parameters must be non-NULL and constant within each SQL partition, although they may differ between partitions. Invalid parameters raise an error. With `eps = 0`, coincident points are neighbors. With `minpoints = 0` or `1`, every participating point belongs to a cluster.
+
+NULL points and points with a NULL coordinate are excluded and return NULL. Non-finite coordinates raise an error. `FILTER` excludes points from both density calculations and cluster assignment; excluded rows return NULL.
+
+Clustering always uses the whole SQL partition. `ROWS`, `RANGE`, `GROUPS`, and `EXCLUDE` clauses do not change the clustering input. `DISTINCT` is unsupported and raises an error. The function must be called with `OVER`.
+
+This overload supports `POINT_2D`, not general geometries. It shares the DBSCAN density and border-point rules with PostGIS, but does not claim full PostGIS API compatibility. Coordinates are interpreted in their supplied units; project longitude/latitude to an appropriate planar CRS before choosing a radius in meters or feet. Dense neighborhoods can require quadratic work.
 
 #### Example
 
@@ -3708,7 +3718,7 @@ CREATE TABLE points AS SELECT {'x': x::DOUBLE, 'y': y::DOUBLE}::POINT_2D AS pt, 
 ) t(x, y, id);
 
 -- Cluster points with eps = 0.5 and minpoints = 3
-SELECT id, pt, ST_ClusterDBSCAN(pt, 0.5, 3) OVER () AS cluster_id
+SELECT id, pt, ST_ClusterDBSCAN(pt, 0.5, 3) OVER (ORDER BY id) AS cluster_id
 FROM points
 ORDER BY id;
 ----
@@ -3724,13 +3734,13 @@ ORDER BY id;
 -- 9 | {'x': 2.5, 'y': 2.5} | NULL
 
 -- Summarize clusters with point counts and centroids
-SELECT 
+SELECT
     cluster_id,
     count(*) AS point_count,
     avg(pt.x) AS centroid_x,
     avg(pt.y) AS centroid_y
 FROM (
-    SELECT pt, ST_ClusterDBSCAN(pt, 0.5, 3) OVER () AS cluster_id
+    SELECT pt, ST_ClusterDBSCAN(pt, 0.5, 3) OVER (ORDER BY id) AS cluster_id
     FROM points
 )
 WHERE cluster_id IS NOT NULL

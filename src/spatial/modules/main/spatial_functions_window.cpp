@@ -158,8 +158,16 @@ void RegisterSpatialWindowFunctions(ExtensionLoader &loader) {
 
 	FunctionBuilder::RegisterAggregate(loader, "ST_ClusterDBSCAN", [&](AggregateFunctionBuilder &func) {
 		func.SetFunction(cluster_point2d);
-		func.SetDescription("Performs DBSCAN density-based clustering over 2D points using an inbuilt R-Tree.");
-		func.SetExample("SELECT id, ST_ClusterDBSCAN(pt, 0.5, 5) OVER () AS cid FROM points;");
+		func.SetDescription(R"(
+            Returns a zero-based DBSCAN cluster ID for each POINT_2D in its SQL partition, or NULL for noise.
+            eps must be finite and non-negative; minpoints must be non-negative. Both parameters must be
+            non-NULL and constant within each partition. A zero radius clusters coincident points.
+            NULL points and NULL coordinates are excluded. Other coordinates must be finite.
+            FILTER excludes points and returns NULL for excluded rows. Clustering uses the whole partition,
+            regardless of frame or EXCLUDE clauses. DISTINCT is unsupported. Use a window ORDER BY with
+            a unique key for reproducible border-point assignments. Distances use the input coordinate units.
+        )");
+		func.SetExample("SELECT id, ST_ClusterDBSCAN(pt, 0.5, 5) OVER (ORDER BY id) AS cid FROM points;");
 		func.CanThrowErrors();
 		func.SetTag("ext", "spatial");
 		func.SetTag("category", "clustering");
