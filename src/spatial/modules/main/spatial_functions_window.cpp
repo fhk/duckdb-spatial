@@ -1,5 +1,3 @@
-#include "spatial/geometry/spatial_index_interface.hpp"
-#include "spatial/geometry/cluster_types.hpp"
 #include "spatial/geometry/flat_rtree.hpp"
 #include "spatial/geometry/dbscan_engine.hpp"
 #include "spatial/modules/main/spatial_functions.hpp"
@@ -58,9 +56,8 @@ struct ST_ClusterDBSCAN_Point2D {
 			return;
 		}
 		spatial::FlatRTree2D index(32);
-		index.Build(spatial::ArrayView<spatial::Point2D>(points));
-		const auto clusters =
-		    spatial::DBSCANEngine::Cluster2D(spatial::ArrayView<spatial::Point2D>(points), index, params);
+		index.Build(points);
+		const auto clusters = spatial::DBSCANEngine::Cluster2D(index, params);
 		for (size_t i = 0; i < rows.size(); i++) {
 			state.cluster_ids[rows[i]] = clusters.GetClusterId(i);
 		}

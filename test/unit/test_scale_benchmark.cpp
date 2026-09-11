@@ -1,6 +1,5 @@
 #include "spatial/geometry/flat_rtree.hpp"
 #include "spatial/geometry/dbscan_engine.hpp"
-#include "spatial/geometry/cluster_types.hpp"
 
 #include <iostream>
 #include <vector>
@@ -24,7 +23,8 @@ void PrintMemUsage() {
 }
 
 // Generate synthetic spatial clusters with background noise
-std::vector<Point2D> GenerateClusters(size_t n_points, size_t n_clusters, double cluster_std, double noise_ratio = 0.05, uint32_t seed = 42) {
+std::vector<Point2D> GenerateClusters(size_t n_points, size_t n_clusters, double cluster_std, double noise_ratio = 0.05,
+                                      uint32_t seed = 42) {
 	std::mt19937 gen(seed);
 	std::uniform_real_distribution<double> center_dist(-500.0, 500.0);
 	std::uniform_real_distribution<double> noise_dist(-600.0, 600.0);
@@ -55,7 +55,8 @@ std::vector<Point2D> GenerateClusters(size_t n_points, size_t n_clusters, double
 	return points;
 }
 
-void RunBenchmark(const std::string &name, size_t n_points, size_t n_clusters, double cluster_std, double eps, int64_t min_pts) {
+void RunBenchmark(const std::string &name, size_t n_points, size_t n_clusters, double cluster_std, double eps,
+                  int64_t min_pts) {
 	std::cout << "=================================================================\n";
 	std::cout << " BENCHMARK: " << name << " (" << n_points << " points)\n";
 	std::cout << " Parameters: eps = " << eps << ", min_points = " << min_pts << "\n";
@@ -66,12 +67,13 @@ void RunBenchmark(const std::string &name, size_t n_points, size_t n_clusters, d
 	auto points = GenerateClusters(n_points, n_clusters, cluster_std);
 	auto t_gen_end = std::chrono::high_resolution_clock::now();
 	double gen_ms = std::chrono::duration<double, std::milli>(t_gen_end - t_gen_start).count();
-	std::cout << "  [1/3] Generated " << points.size() << " points in " << std::fixed << std::setprecision(2) << gen_ms << " ms\n";
+	std::cout << "  [1/3] Generated " << points.size() << " points in " << std::fixed << std::setprecision(2) << gen_ms
+	          << " ms\n";
 
 	// 2. Build Inbuilt FlatRTree
 	FlatRTree2D rtree(64);
 	auto t_tree_start = std::chrono::high_resolution_clock::now();
-	rtree.Build(ArrayView<Point2D>(points));
+	rtree.Build(points);
 	auto t_tree_end = std::chrono::high_resolution_clock::now();
 	double tree_ms = std::chrono::duration<double, std::milli>(t_tree_end - t_tree_start).count();
 	std::cout << "  [2/3] Built Inbuilt FlatRTree in " << tree_ms << " ms\n";
@@ -79,7 +81,7 @@ void RunBenchmark(const std::string &name, size_t n_points, size_t n_clusters, d
 	// 3. Run DBSCAN
 	DBSCANParams params(eps, min_pts);
 	auto t_dbscan_start = std::chrono::high_resolution_clock::now();
-	auto result = DBSCANEngine::Cluster2D(ArrayView<Point2D>(points), rtree, params);
+	auto result = DBSCANEngine::Cluster2D(rtree, params);
 	auto t_dbscan_end = std::chrono::high_resolution_clock::now();
 	double dbscan_ms = std::chrono::duration<double, std::milli>(t_dbscan_end - t_dbscan_start).count();
 
@@ -91,8 +93,8 @@ void RunBenchmark(const std::string &name, size_t n_points, size_t n_clusters, d
 	std::cout << "  RESULTS:\n";
 	std::cout << "    * Total Points:       " << n_points << "\n";
 	std::cout << "    * Clusters Found:     " << result.NumClusters() << "\n";
-	std::cout << "    * Noise Points:       " << result.NumNoise() << " (" 
-	          << std::fixed << std::setprecision(1) << (100.0 * result.NumNoise() / n_points) << "%)\n";
+	std::cout << "    * Noise Points:       " << result.NumNoise() << " (" << std::fixed << std::setprecision(1)
+	          << (100.0 * result.NumNoise() / n_points) << "%)\n";
 	std::cout << "    * Total Index+Cluster: " << std::fixed << std::setprecision(2) << total_ms << " ms\n";
 	std::cout << "    * Throughput:         " << static_cast<size_t>(throughput) << " points/sec\n";
 	std::cout << "  MEMORY PROFILE:\n";
