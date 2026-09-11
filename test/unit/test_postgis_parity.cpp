@@ -7,6 +7,36 @@
 
 using namespace duckdb::spatial;
 
+void TestCancellation() {
+	std::vector<Point2D> points(10000, Point2D(0, 0));
+	size_t checks = 0;
+	bool cancel = true;
+	FlatRTree2D tree(32, [&]() {
+		if (cancel && ++checks == 3) {
+			throw std::runtime_error("cancelled");
+		}
+	});
+	bool interrupted = false;
+	try {
+		tree.Build(points);
+	} catch (const std::runtime_error &) {
+		interrupted = true;
+	}
+	assert(interrupted);
+	// A cancelled build can be rebuilt, and cancellation also reaches queries.
+	cancel = false;
+	tree.Build(points);
+	cancel = true;
+	checks = 0;
+	interrupted = false;
+	try {
+		DBSCANEngine::Cluster2D(tree, DBSCANParams(1, 2));
+	} catch (const std::runtime_error &) {
+		interrupted = true;
+	}
+	assert(interrupted);
+}
+
 void TestCoordinateRanges() {
 	for (double scale : {1e-200, 1.0, 1e200}) {
 		std::vector<Point2D> points = {{0, 0}, {scale, scale}};
@@ -238,6 +268,7 @@ void TestPostGISRegressionSinglePoint3612b() {
 }
 
 int main() {
+	TestCancellation();
 	TestCoordinateRanges();
 	TestSmallTreeRegression();
 	std::cout << "==========================================================" << std::endl;

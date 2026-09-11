@@ -7,6 +7,8 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <functional>
+#include <utility>
 
 namespace duckdb {
 namespace spatial {
@@ -35,13 +37,21 @@ using BBox2D = Box2D<double>;
 // In-Memory Packed Static R-Tree (Hilbert-curve sorted bulk load)
 class FlatRTree2D {
 public:
-	explicit FlatRTree2D(size_t node_size = 32) : node_size_(node_size), item_count_(0), points_(nullptr) {
+	explicit FlatRTree2D(size_t node_size = 32, std::function<void()> interrupt = {})
+	    : node_size_(node_size), item_count_(0), points_(nullptr), interrupt_(std::move(interrupt)) {
 		if (node_size < 2) {
 			throw std::invalid_argument("R-tree node size must be at least 2");
 		}
 	}
 
+	void CheckInterrupt() const {
+		if (interrupt_) {
+			interrupt_();
+		}
+	}
+
 	void Build(const std::vector<Point2D> &points) {
+		CheckInterrupt();
 		points_ = &points;
 		item_count_ = points.size();
 
@@ -61,6 +71,9 @@ public:
 		// Compute data bounds
 		tree_box_ = BBox2D();
 		for (size_t i = 0; i < item_count_; ++i) {
+			if (i % 1024 == 0) {
+				CheckInterrupt();
+			}
 			const double x = points[i].x;
 			const double y = points[i].y;
 			if (!std::isfinite(x) || !std::isfinite(y)) {
@@ -89,6 +102,9 @@ public:
 
 		std::vector<uint32_t> curve(item_count_);
 		for (size_t i = 0; i < item_count_; ++i) {
+			if (i % 1024 == 0) {
+				CheckInterrupt();
+			}
 			const double norm_x = (points[i].x * 0.5 - tree_box_.min.x * 0.5) / width;
 			const double norm_y = (points[i].y * 0.5 - tree_box_.min.y * 0.5) / height;
 			const uint32_t hx = static_cast<uint32_t>(std::max(0.0, std::min(max_hilbert, norm_x * max_hilbert)));
@@ -96,8 +112,21 @@ public:
 			curve[i] = HilbertEncode(hx, hy);
 		}
 
-		// Sort leaves by Hilbert curve value
-		QuickSort(curve, 0, item_count_ - 1);
+		// Sort leaf indices, breaking Hilbert ties by input position. std::sort
+		// bounds the worst-case work and avoids a custom recursive quicksort.
+		size_t comparisons = 0;
+		std::sort(indices_.begin(), indices_.begin() + item_count_, [&](size_t lhs, size_t rhs) {
+			if (++comparisons % 1024 == 0) {
+				CheckInterrupt();
+			}
+			return curve[lhs] < curve[rhs] || (curve[lhs] == curve[rhs] && lhs < rhs);
+		});
+		for (size_t i = 0; i < item_count_; i++) {
+			if (i % 1024 == 0) {
+				CheckInterrupt();
+			}
+			boxes_[i] = BBox2D(points[indices_[i]], points[indices_[i]]);
+		}
 
 		// Build internal R-Tree layers bottom-up
 		size_t current_pos = item_count_;
@@ -113,6 +142,9 @@ public:
 
 				size_t child_count = 0;
 				while (child_count < node_size_ && entry_idx < entry_end) {
+					if (entry_idx % 1024 == 0) {
+						CheckInterrupt();
+					}
 					node_box.Union(boxes_[entry_idx]);
 					child_count++;
 					entry_idx++;
@@ -128,6 +160,7 @@ public:
 	}
 
 	void RadiusSearch(const Point2D &center, double eps, std::vector<size_t> &matches) const {
+		CheckInterrupt();
 		matches.clear();
 		if (item_count_ == 0) {
 			return;
@@ -147,7 +180,11 @@ public:
 		const size_t root_pos = layer_bounds_.back() - 1;
 		stack.push_back(root_pos);
 
+		size_t visited = 0;
 		while (!stack.empty()) {
+			if (++visited % 1024 == 0) {
+				CheckInterrupt();
+			}
 			const size_t node_pos = stack.back();
 			stack.pop_back();
 
@@ -167,6 +204,9 @@ public:
 				const size_t child_end = std::min(child_start + node_size_, UpperBound(child_start));
 
 				for (size_t c = child_start; c < child_end; ++c) {
+					if (c % 1024 == 0) {
+						CheckInterrupt();
+					}
 					if (search_box.Intersects(boxes_[c])) {
 						stack.push_back(c);
 					}
@@ -206,34 +246,6 @@ private:
 		return layer_bounds_.back();
 	}
 
-	void QuickSort(std::vector<uint32_t> &curve, int64_t left, int64_t right) {
-		if (left >= right) {
-			return;
-		}
-
-		uint32_t pivot = curve[(left + right) / 2];
-		int64_t i = left - 1;
-		int64_t j = right + 1;
-
-		while (true) {
-			do {
-				i++;
-			} while (curve[i] < pivot);
-			do {
-				j--;
-			} while (curve[j] > pivot);
-			if (i >= j)
-				break;
-
-			std::swap(curve[i], curve[j]);
-			std::swap(boxes_[i], boxes_[j]);
-			std::swap(indices_[i], indices_[j]);
-		}
-
-		QuickSort(curve, left, j);
-		QuickSort(curve, j + 1, right);
-	}
-
 	size_t node_size_;
 	size_t item_count_;
 	BBox2D tree_box_;
@@ -242,6 +254,7 @@ private:
 	std::vector<size_t> layer_bounds_;
 	std::vector<BBox2D> boxes_;
 	std::vector<size_t> indices_;
+	std::function<void()> interrupt_;
 };
 
 } // namespace spatial

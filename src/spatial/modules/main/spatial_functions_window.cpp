@@ -5,6 +5,8 @@
 #include "spatial/util/function_builder.hpp"
 
 #include "duckdb/function/aggregate_function.hpp"
+#include "duckdb/execution/execution_context.hpp"
+#include "duckdb/main/client_context.hpp"
 #include "duckdb/common/types/column/column_data_collection.hpp"
 
 namespace duckdb {
@@ -51,11 +53,16 @@ struct ST_ClusterDBSCAN_Point2D {
 	}
 
 	static void ClusterPartition(const std::vector<spatial::Point2D> &points, const std::vector<size_t> &rows,
-	                             const spatial::DBSCANParams &params, DBSCANWindowState &state) {
+	                             const spatial::DBSCANParams &params, DBSCANWindowState &state,
+	                             ClientContext &context) {
 		if (points.empty()) {
 			return;
 		}
-		spatial::FlatRTree2D index(32);
+		spatial::FlatRTree2D index(32, [&context]() {
+			if (context.IsInterrupted()) {
+				throw InterruptException();
+			}
+		});
 		index.Build(points);
 		const auto clusters = spatial::DBSCANEngine::Cluster2D(index, params);
 		for (size_t i = 0; i < rows.size(); i++) {
@@ -80,6 +87,9 @@ struct ST_ClusterDBSCAN_Point2D {
 		spatial::DBSCANParams params;
 		idx_t row_offset = 0;
 		for (auto &chunk : partition.inputs->Chunks(partition.column_ids)) {
+			if (partition.context.client.IsInterrupted()) {
+				throw InterruptException();
+			}
 			auto &point_vector = chunk.data[0];
 			point_vector.Flatten(chunk.size());
 			auto &coordinates = StructVector::GetEntries(point_vector);
@@ -95,7 +105,7 @@ struct ST_ClusterDBSCAN_Point2D {
 				const auto row = row_offset + i;
 				const auto row_params = ReadParameters(chunk, i);
 				if (row == 0 || partition.partition_mask->RowIsValid(row)) {
-					ClusterPartition(points, rows, params, state);
+					ClusterPartition(points, rows, params, state, partition.context.client);
 					points.clear();
 					rows.clear();
 					params = row_params;
@@ -114,7 +124,7 @@ struct ST_ClusterDBSCAN_Point2D {
 			}
 			row_offset += chunk.size();
 		}
-		ClusterPartition(points, rows, params, state);
+		ClusterPartition(points, rows, params, state, partition.context.client);
 	}
 
 	static void Window(AggregateInputData &, const WindowPartitionInput &partition, const_data_ptr_t g_state,

@@ -6,6 +6,7 @@ namespace spatial {
 
 DBSCANResult DBSCANEngine::Cluster2D(const FlatRTree2D &index, const DBSCANParams &params) {
 	params.Validate();
+	index.CheckInterrupt();
 
 	const size_t n_points = index.Count();
 	DBSCANResult result(n_points);
@@ -22,6 +23,9 @@ DBSCANResult DBSCANEngine::Cluster2D(const FlatRTree2D &index, const DBSCANParam
 	std::vector<bool> in_queue(n_points, false);
 
 	for (size_t i = 0; i < n_points; ++i) {
+		if (i % 1024 == 0) {
+			index.CheckInterrupt();
+		}
 		if (!result.IsUnvisited(i)) {
 			continue;
 		}
@@ -40,7 +44,11 @@ DBSCANResult DBSCANEngine::Cluster2D(const FlatRTree2D &index, const DBSCANParam
 		const int32_t current_cluster = static_cast<int32_t>(cluster_count++);
 		result.SetClusterId(i, current_cluster);
 
+		size_t visited = 0;
 		for (size_t nb : neighbors) {
+			if (++visited % 1024 == 0) {
+				index.CheckInterrupt();
+			}
 			if (nb != i && !in_queue[nb]) {
 				worklist.push(nb);
 				in_queue[nb] = true;
@@ -48,6 +56,9 @@ DBSCANResult DBSCANEngine::Cluster2D(const FlatRTree2D &index, const DBSCANParam
 		}
 
 		while (!worklist.empty()) {
+			if (++visited % 1024 == 0) {
+				index.CheckInterrupt();
+			}
 			size_t q = worklist.front();
 			worklist.pop();
 			in_queue[q] = false;
@@ -71,6 +82,9 @@ DBSCANResult DBSCANEngine::Cluster2D(const FlatRTree2D &index, const DBSCANParam
 			index.RadiusSearch(index.GetPoint(q), params.eps, sub_neighbors);
 			if (sub_neighbors.size() >= static_cast<size_t>(params.min_points)) {
 				for (size_t sub_nb : sub_neighbors) {
+					if (++visited % 1024 == 0) {
+						index.CheckInterrupt();
+					}
 					int32_t sub_status = result.GetClusterId(sub_nb);
 					if ((sub_status == static_cast<int32_t>(ClusterStatus::UNVISITED) ||
 					     sub_status == static_cast<int32_t>(ClusterStatus::NOISE)) &&
