@@ -1,11 +1,60 @@
 #include <iostream>
 #include <vector>
-#include <cassert>
+#include <stdexcept>
+#include <random>
 #include <string>
 #include "spatial/geometry/flat_rtree.hpp"
 #include "spatial/geometry/dbscan_engine.hpp"
 
 using namespace duckdb::spatial;
+
+static void Check(bool condition, const char *expression, int line) {
+	if (!condition) {
+		throw std::runtime_error(std::string("Check failed at line ") + std::to_string(line) + ": " + expression);
+	}
+}
+
+// These checks remain active in Release builds (unlike assert).
+#define CHECK(condition) Check(bool(condition), #condition, __LINE__)
+
+void TestRandomNeighborhoods() {
+	std::mt19937 random(42);
+	std::uniform_real_distribution<double> coordinate(-10, 10);
+	std::vector<Point2D> points;
+	for (size_t i = 0; i < 257; i++) {
+		points.emplace_back(coordinate(random), coordinate(random));
+	}
+	points.push_back(points[0]); // Coincident points count separately.
+	for (size_t node_size : {2, 16, 32, 64}) {
+		FlatRTree2D index(node_size);
+		index.Build(points);
+		for (double eps : {0.0, 0.5, 4.0}) {
+			for (const auto &point : points) {
+				std::vector<size_t> expected;
+				for (size_t i = 0; i < points.size(); i++) {
+					if (std::hypot(point.x - points[i].x, point.y - points[i].y) <= eps) {
+						expected.push_back(i);
+					}
+				}
+				std::vector<size_t> actual;
+				index.RadiusSearch(point, eps, actual);
+				std::sort(actual.begin(), actual.end());
+				CHECK(actual == expected);
+			}
+		}
+	}
+}
+
+void TestBorderAdoption() {
+	// The first point is initially noise. It touches two distinct core groups
+	// and must be adopted by the first group, without merging the two groups.
+	std::vector<Point2D> points = {{0, 0},   {-0.5, 0}, {-1, 0},   {-1.05, 0}, {-1.1, 0},
+	                               {0.5, 0}, {1, 0},    {1.05, 0}, {1.1, 0}};
+	FlatRTree2D index;
+	index.Build(points);
+	const auto result = DBSCANEngine::Cluster2D(index, DBSCANParams(0.61, 4));
+	CHECK(result.GetClusterIds() == std::vector<int32_t>({0, 0, 0, 0, 0, 1, 1, 1, 1}));
+}
 
 void TestCancellation() {
 	std::vector<Point2D> points(10000, Point2D(0, 0));
@@ -22,7 +71,7 @@ void TestCancellation() {
 	} catch (const std::runtime_error &) {
 		interrupted = true;
 	}
-	assert(interrupted);
+	CHECK(interrupted);
 	// A cancelled build can be rebuilt, and cancellation also reaches queries.
 	cancel = false;
 	tree.Build(points);
@@ -34,7 +83,7 @@ void TestCancellation() {
 	} catch (const std::runtime_error &) {
 		interrupted = true;
 	}
-	assert(interrupted);
+	CHECK(interrupted);
 }
 
 void TestCoordinateRanges() {
@@ -44,7 +93,7 @@ void TestCoordinateRanges() {
 		tree.Build(points);
 		// A square candidate box must still receive an exact circular check.
 		const auto result = DBSCANEngine::Cluster2D(tree, DBSCANParams(scale, 2));
-		assert(result.NumNoise() == 2);
+		CHECK(result.NumNoise() == 2);
 	}
 	for (size_t node_size : {0, 1}) {
 		bool rejected = false;
@@ -53,7 +102,7 @@ void TestCoordinateRanges() {
 		} catch (const std::invalid_argument &) {
 			rejected = true;
 		}
-		assert(rejected);
+		CHECK(rejected);
 	}
 }
 
@@ -62,7 +111,7 @@ void TestSmallTreeRegression() {
 	FlatRTree2D tree(32); // Same node size as the SQL window function.
 	tree.Build(points);
 	auto result = DBSCANEngine::Cluster2D(tree, DBSCANParams(0.2, 2));
-	assert(result.GetClusterIds() == std::vector<int32_t>({0, 0, 0, 1, 1, -1}));
+	CHECK(result.GetClusterIds() == std::vector<int32_t>({0, 0, 0, 1, 1, -1}));
 
 	// Compare neighborhood searches with brute force across the small-tree
 	// cutoff and multiple tree levels. Reuse the tree to check rebuilds too.
@@ -72,10 +121,10 @@ void TestSmallTreeRegression() {
 			points.emplace_back(double(i % 17), double(i / 17));
 		}
 		tree.Build(points);
-		assert(tree.Count() == count);
+		CHECK(tree.Count() == count);
 		std::vector<size_t> actual = {9999};
 		tree.RadiusSearch(Point2D(-100, -100), 0.2, actual);
-		assert(actual.empty());
+		CHECK(actual.empty());
 		for (const auto &center : points) {
 			std::vector<size_t> expected;
 			for (size_t i = 0; i < count; ++i) {
@@ -85,7 +134,7 @@ void TestSmallTreeRegression() {
 			}
 			tree.RadiusSearch(center, 1.25, actual);
 			std::sort(actual.begin(), actual.end());
-			assert(actual == expected);
+			CHECK(actual == expected);
 		}
 	}
 	std::cout << "Small-tree DBSCAN and radius-search regressions passed!" << std::endl;
@@ -118,20 +167,20 @@ void TestPostGISDocExample() {
 	DBSCANParams params(50.0, 2);
 	DBSCANResult result = DBSCANEngine::Cluster2D(rtree, params);
 
-	assert(result.NumClusters() == 2);
-	assert(result.NumNoise() == 1);
+	CHECK(result.NumClusters() == 2);
+	CHECK(result.NumNoise() == 1);
 
 	// Verify A1 and A2 are in the same cluster (cluster 0)
-	assert(result.GetClusterId(0) == 0);
-	assert(result.GetClusterId(1) == 0);
+	CHECK(result.GetClusterId(0) == 0);
+	CHECK(result.GetClusterId(1) == 0);
 
 	// Verify B1 and B2 are in the same cluster (cluster 1)
-	assert(result.GetClusterId(2) == 1);
-	assert(result.GetClusterId(3) == 1);
+	CHECK(result.GetClusterId(2) == 1);
+	CHECK(result.GetClusterId(3) == 1);
 
 	// Verify noise point is unclustered (cluster ID = -1, which maps to SQL NULL)
-	assert(result.GetClusterId(4) == -1);
-	assert(result.IsNoise(4));
+	CHECK(result.GetClusterId(4) == -1);
+	CHECK(result.IsNoise(4));
 
 	std::cout << "  -> PostGIS Doc Example PASSED! (Clusters: {A1, A2} => 0, {B1, B2} => 1, {noise} => NULL)"
 	          << std::endl;
@@ -165,16 +214,16 @@ void TestPostGISRegressionT101() {
 	DBSCANParams params(0.8, 1);
 	DBSCANResult result = DBSCANEngine::Cluster2D(rtree, params);
 
-	assert(result.NumClusters() == 2);
-	assert(result.NumNoise() == 0);
+	CHECK(result.NumClusters() == 2);
+	CHECK(result.NumNoise() == 0);
 
-	assert(result.GetClusterId(0) == 0);
-	assert(result.GetClusterId(1) == 0);
-	assert(result.GetClusterId(2) == 0);
+	CHECK(result.GetClusterId(0) == 0);
+	CHECK(result.GetClusterId(1) == 0);
+	CHECK(result.GetClusterId(2) == 0);
 
-	assert(result.GetClusterId(3) == 1);
-	assert(result.GetClusterId(4) == 1);
-	assert(result.GetClusterId(5) == 1);
+	CHECK(result.GetClusterId(3) == 1);
+	CHECK(result.GetClusterId(4) == 1);
+	CHECK(result.GetClusterId(5) == 1);
 
 	std::cout << "  -> PostGIS t101 PASSED! (Left: 0, Right: 1, 0 noise)" << std::endl;
 }
@@ -192,12 +241,12 @@ void TestPostGISRegressionT102() {
 	DBSCANParams params(0.8, 4);
 	DBSCANResult result = DBSCANEngine::Cluster2D(rtree, params);
 
-	assert(result.NumClusters() == 0);
-	assert(result.NumNoise() == 6);
+	CHECK(result.NumClusters() == 0);
+	CHECK(result.NumNoise() == 6);
 
 	for (size_t i = 0; i < 6; ++i) {
-		assert(result.GetClusterId(i) == -1);
-		assert(result.IsNoise(i));
+		CHECK(result.GetClusterId(i) == -1);
+		CHECK(result.IsNoise(i));
 	}
 
 	std::cout << "  -> PostGIS t102 PASSED! (All 6 points are NULL/noise)" << std::endl;
@@ -227,21 +276,21 @@ void TestPostGISRegressionT103() {
 	DBSCANParams params(0.6, 3);
 	DBSCANResult result = DBSCANEngine::Cluster2D(rtree, params);
 
-	assert(result.NumClusters() == 1);
-	assert(result.NumNoise() == 3);
+	CHECK(result.NumClusters() == 1);
+	CHECK(result.NumNoise() == 3);
 
 	// Left group are NULL
-	assert(result.GetClusterId(0) == -1);
-	assert(result.GetClusterId(1) == -1);
-	assert(result.GetClusterId(2) == -1);
-	assert(result.IsNoise(0));
-	assert(result.IsNoise(1));
-	assert(result.IsNoise(2));
+	CHECK(result.GetClusterId(0) == -1);
+	CHECK(result.GetClusterId(1) == -1);
+	CHECK(result.GetClusterId(2) == -1);
+	CHECK(result.IsNoise(0));
+	CHECK(result.IsNoise(1));
+	CHECK(result.IsNoise(2));
 
 	// Right group forms Cluster 0
-	assert(result.GetClusterId(3) == 0);
-	assert(result.GetClusterId(4) == 0);
-	assert(result.GetClusterId(5) == 0);
+	CHECK(result.GetClusterId(3) == 0);
+	CHECK(result.GetClusterId(4) == 0);
+	CHECK(result.GetClusterId(5) == 0);
 
 	std::cout << "  -> PostGIS t103 PASSED! (Left: NULL, Right: Cluster 0 with 1 Core + 2 Border points)" << std::endl;
 }
@@ -259,29 +308,36 @@ void TestPostGISRegressionSinglePoint3612b() {
 	DBSCANParams params(20.1, 5);
 	DBSCANResult result = DBSCANEngine::Cluster2D(rtree, params);
 
-	assert(result.NumClusters() == 0);
-	assert(result.NumNoise() == 1);
-	assert(result.GetClusterId(0) == -1);
-	assert(result.IsNoise(0));
+	CHECK(result.NumClusters() == 0);
+	CHECK(result.NumNoise() == 1);
+	CHECK(result.GetClusterId(0) == -1);
+	CHECK(result.IsNoise(0));
 
 	std::cout << "  -> PostGIS #3612b PASSED! (Single point => NULL/noise)" << std::endl;
 }
 
 int main() {
-	TestCancellation();
-	TestCoordinateRanges();
-	TestSmallTreeRegression();
-	std::cout << "==========================================================" << std::endl;
-	std::cout << "      PostGIS ST_ClusterDBSCAN Parity & Reproduction      " << std::endl;
-	std::cout << "==========================================================" << std::endl;
+	try {
+		TestRandomNeighborhoods();
+		TestBorderAdoption();
+		TestCancellation();
+		TestCoordinateRanges();
+		TestSmallTreeRegression();
+		std::cout << "==========================================================" << std::endl;
+		std::cout << "      DBSCAN Engine Regression Tests      " << std::endl;
+		std::cout << "==========================================================" << std::endl;
 
-	TestPostGISDocExample();
-	TestPostGISRegressionT101();
-	TestPostGISRegressionT102();
-	TestPostGISRegressionT103();
-	TestPostGISRegressionSinglePoint3612b();
+		TestPostGISDocExample();
+		TestPostGISRegressionT101();
+		TestPostGISRegressionT102();
+		TestPostGISRegressionT103();
+		TestPostGISRegressionSinglePoint3612b();
 
-	std::cout << std::endl;
-	std::cout << "All PostGIS ST_ClusterDBSCAN reproduction tests passed with 100% parity!" << std::endl;
-	return 0;
+		std::cout << std::endl;
+		std::cout << "All DBSCAN engine regressions passed." << std::endl;
+		return 0;
+	} catch (const std::exception &error) {
+		std::cerr << error.what() << std::endl;
+		return 1;
+	}
 }
